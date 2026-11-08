@@ -1,0 +1,75 @@
+plugins {
+	id 'fabric-loom' version "${loom_version}"
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+	archivesName = project.archives_base_name
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	mappings loom.officialMojangMappings()
+	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+}
+
+processResources {
+	inputs.property "version", project.version
+	filesMatching("fabric.mod.json") {
+		expand "version": inputs.properties.version
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	// Der Launcher läuft schon ab Java 8, die Mod braucht Java 21
+	it.options.release = (it.name == 'compileLauncherJava') ? 8 : 21
+	it.options.encoding = "UTF-8"
+	it.options.compilerArgs += ['-Xlint:-options']
+}
+
+// ---------------------------------------------------------------- Bambus Launcher
+// "gradlew build" baut zusätzlich build/libs/BambusLauncher.jar – mit der Mod darin.
+
+sourceSets {
+	launcher {
+		java { srcDirs = ['launcher/src'] }
+		resources { srcDirs = ['launcher/resources'] }
+	}
+}
+
+// Die Cape-Bilder aus der Mod auch im Launcher anzeigen (Kosmetik-Vorschau)
+tasks.named('processLauncherResources', ProcessResources) {
+	from('src/main/resources/assets/bambus/textures/cape') {
+		into 'capes'
+	}
+	from('src/main/resources/assets/bambus/textures/fluegel') {
+		into 'fluegel'
+	}
+}
+
+tasks.register('launcherJar', Jar) {
+	group = 'build'
+	description = 'Baut den Bambus Launcher mit eingebauter Mod.'
+	dependsOn remapJar
+	archiveFileName = 'BambusLauncher.jar'
+	destinationDirectory = layout.buildDirectory.dir('libs')
+	from sourceSets.launcher.output
+	from(remapJar.archiveFile) {
+		rename { 'bambus-client.jar' }
+	}
+	manifest {
+		attributes 'Main-Class': 'de.bambus.launcher.BambusLauncher'
+	}
+}
+
+tasks.named('build') {
+	dependsOn 'launcherJar'
+}
+
+java {
+	sourceCompatibility = JavaVersion.VERSION_21
+	targetCompatibility = JavaVersion.VERSION_21
+}
