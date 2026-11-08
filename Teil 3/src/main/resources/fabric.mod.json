@@ -1,0 +1,31 @@
+{
+	"schemaVersion": 1,
+	"id": "bambus",
+	"version": "${version}",
+	"name": "Bambus Client",
+	"description": "Leichter PvP-/HUD-Client: Mod-Menü, verschiebbares HUD, Keystrokes, CPS, Rüstung, Tränke, Ping, Zoom, Freelook, Fullbright, Fadenkreuz, Cape.",
+	"authors": [
+		"Bambus"
+	],
+	"license": "MIT",
+	"icon": "assets/bambus/icon.png",
+	"environment": "client",
+	"entrypoints": {
+		"client": [
+			"de.bambus.client.BambusClient"
+		]
+	},
+	"depends": {
+		"fabricloader": ">=0.18.1",
+		"minecraft": "~1.21.11",
+		"java": ">=21",
+		"fabric-api": "*"
+	},
+	"suggests": {
+		"modmenu": "*",
+		"sodium": "*"
+	},
+	"mixins": [
+		"bambus.mixins.json"
+	]
+}
