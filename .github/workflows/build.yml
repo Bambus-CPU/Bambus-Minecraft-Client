@@ -1,0 +1,244 @@
+ame: Bambus Client bauen
+
+# Läuft bei jedem Hochladen. Mit einem Tag wie "v3.3.0" entsteht zusätzlich
+# ein Release mit Download-Seite.
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # 1) Mod und Launcher (.jar) bauen
+  jar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: Version aus dem Tag übernehmen (z. B. v3.3.0 → 3.3.0)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          sed -i "s/static final String VERSION = \"[^\"]*\"/static final String VERSION = \"$V\"/" \
+            launcher/src/de/bambus/launcher/BambusLauncher.java src/main/java/de/bambus/client/BambusClient.java
+          sed -i "s/^mod_version=.*/mod_version=$V/" gradle.properties
+      - name: Update-Quelle eintragen (damit der Launcher Updates findet)
+        run: echo "${{ github.repository }}" > launcher/resources/update-quelle.txt
+      - name: Bauen
+        run: chmod +x gradlew && ./gradlew build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BambusLauncher-jar
+          path: build/libs/BambusLauncher.jar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bambus-client-mod
+          path: |
+            build/libs/bambus-client-*.jar
+            !build/libs/*-sources.jar
+
+  # 2) Windows: Launcher mit eingebautem Java – man braucht nur noch Minecraft
+  windows:
+    needs: jar
+    runs-on: windows-latest
+    env:
+      # Signieren nur, wenn ein Zertifikat als Secret hinterlegt ist (siehe RECHTLICHES.md)
+      HAS_WIN_CERT: ${{ secrets.WINDOWS_CERT_PFX_BASE64 != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Versionsnummer festlegen
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then echo "APP_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"; else echo "APP_VERSION=3.3.0" >> "$GITHUB_ENV"; fi
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: actions/download-artifact@v4
+        with:
+          name: BambusLauncher-jar
+          path: eingabe
+      - name: Programm mit eigenem Java erstellen
+        shell: pwsh
+        run: |
+          jpackage --type app-image --name "Bambus Launcher" --app-version $env:APP_VERSION --vendor "Bambus" `
+            --input eingabe --main-jar BambusLauncher.jar --main-class de.bambus.launcher.BambusLauncher `
+            --icon launcher/packaging/bambus.ico `
+            --add-modules java.base,java.desktop,jdk.crypto.ec,jdk.charsets,jdk.zipfs,jdk.localedata `
+            --jlink-options "--strip-debug --no-header-files --no-man-pages --compress=zip-6" `
+            --dest ausgabe
+          Compress-Archive -Path "ausgabe/Bambus Launcher" -DestinationPath "Bambus-Launcher-Windows.zip"
+      - name: Zertifikat vorbereiten und Programm signieren (nur mit Zertifikat)
+        if: env.HAS_WIN_CERT == 'true'
+        shell: pwsh
+        env:
+          WIN_CERT: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WIN_CERT_PW: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          [IO.File]::WriteAllBytes("$pwd\zert.pfx", [Convert]::FromBase64String($env:WIN_CERT))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+            Where-Object FullName -like "*x64*" | Select-Object -First 1 -ExpandProperty FullName
+          "SIGNTOOL=$signtool" | Out-File -FilePath $env:GITHUB_ENV -Append
+          & $signtool sign /f zert.pfx /p $env:WIN_CERT_PW /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+            "ausgabe\Bambus Launcher\Bambus Launcher.exe"
+          if ($LASTEXITCODE -ne 0) { throw "Signieren fehlgeschlagen." }
+          Compress-Archive -Path "ausgabe/Bambus Launcher" -DestinationPath "Bambus-Launcher-Windows.zip" -Force
+      - name: Inno Setup bereitstellen
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          if (-not (Test-Path $iscc)) { throw "Inno Setup wurde nicht gefunden." }
+      - name: Installationsprogramm (Setup.exe) erstellen
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $iscc "/DAppVersion=$env:APP_VERSION" "/DSourceDir=$pwd\ausgabe\Bambus Launcher" "/O$pwd\setup" `
+            "launcher\packaging\windows\bambus.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Setup konnte nicht gebaut werden." }
+          Move-Item "setup\Bambus-Launcher-Setup.exe" "Bambus-Launcher-Setup.exe"
+      - name: Setup signieren (nur mit Zertifikat)
+        if: env.HAS_WIN_CERT == 'true'
+        shell: pwsh
+        env:
+          WIN_CERT_PW: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          & $env:SIGNTOOL sign /f zert.pfx /p $env:WIN_CERT_PW /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
+            "Bambus-Launcher-Setup.exe"
+          if ($LASTEXITCODE -ne 0) { throw "Signieren fehlgeschlagen." }
+          Remove-Item zert.pfx
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Bambus-Launcher-Windows-Setup
+          path: Bambus-Launcher-Setup.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Bambus-Launcher-Windows-Zip
+          path: Bambus-Launcher-Windows.zip
+
+  # 3) Mac: Launcher mit eingebautem Java als .dmg (Apple Silicon und Intel)
+  mac:
+    needs: jar
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            name: AppleSilicon
+          - runner: macos-15-intel
+            name: Intel
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: true
+    env:
+      # Signieren/Notarisieren nur, wenn Apple-Zertifikat und Zugang als Secrets hinterlegt sind
+      HAS_MAC_CERT: ${{ secrets.MAC_CERT_P12_BASE64 != '' }}
+      HAS_MAC_NOTARY: ${{ secrets.MAC_CERT_P12_BASE64 != '' && secrets.APPLE_APP_PASSWORD != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Versionsnummer festlegen
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then echo "APP_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"; else echo "APP_VERSION=3.3.0" >> "$GITHUB_ENV"; fi
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: actions/download-artifact@v4
+        with:
+          name: BambusLauncher-jar
+          path: eingabe
+      - name: Zertifikat in den Schlüsselbund (nur mit Zertifikat)
+        if: env.HAS_MAC_CERT == 'true'
+        env:
+          MAC_CERT: ${{ secrets.MAC_CERT_P12_BASE64 }}
+          MAC_CERT_PW: ${{ secrets.MAC_CERT_PASSWORD }}
+        run: |
+          echo "$MAC_CERT" | base64 --decode > zert.p12
+          security create-keychain -p bambus bambus.keychain
+          security list-keychains -d user -s bambus.keychain $(security list-keychains -d user | tr -d '"')
+          security unlock-keychain -p bambus bambus.keychain
+          security import zert.p12 -k bambus.keychain -P "$MAC_CERT_PW" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k bambus bambus.keychain
+          rm zert.p12
+      - name: DMG erstellen
+        env:
+          MAC_SIGN_NAME: ${{ secrets.MAC_SIGN_NAME }}
+        run: |
+          SIGNIEREN=()
+          if [ "$HAS_MAC_CERT" = "true" ]; then
+            SIGNIEREN=(--mac-sign --mac-signing-key-user-name "$MAC_SIGN_NAME" \
+              --mac-signing-keychain "$HOME/Library/Keychains/bambus.keychain-db")
+          fi
+          jpackage --type dmg "${SIGNIEREN[@]}" --name "Bambus Launcher" --app-version "$APP_VERSION" --vendor "Bambus" \
+            --input eingabe --main-jar BambusLauncher.jar --main-class de.bambus.launcher.BambusLauncher \
+            --icon launcher/packaging/bambus.icns \
+            --mac-package-identifier de.bambus.launcher --mac-package-name "Bambus Launcher" \
+            --add-modules java.base,java.desktop,jdk.crypto.ec,jdk.charsets,jdk.zipfs,jdk.localedata \
+            --jlink-options "--strip-debug --no-header-files --no-man-pages --compress=zip-6" \
+            --dest ausgabe
+          mv ausgabe/*.dmg "Bambus-Launcher-Mac-${{ matrix.name }}.dmg"
+      - name: Bei Apple beglaubigen (nur mit Apple-Zugang)
+        if: env.HAS_MAC_NOTARY == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          xcrun notarytool submit "Bambus-Launcher-Mac-${{ matrix.name }}.dmg" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple "Bambus-Launcher-Mac-${{ matrix.name }}.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Bambus-Launcher-Mac-${{ matrix.name }}
+          path: Bambus-Launcher-Mac-${{ matrix.name }}.dmg
+
+  # 4) Alles in EINEN Download packen
+  paket:
+    if: always() && needs.jar.result == 'success'
+    needs: [jar, windows, mac]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dateien
+          merge-multiple: true
+      - name: Zusammenpacken
+        run: |
+          mkdir -p "Bambus Client"
+          find dateien -type f \( -name "*.dmg" -o -name "*.exe" -o -name "BambusLauncher.jar" \) -exec cp {} "Bambus Client/" \;
+          cp ANLEITUNG.md LICENSE RECHTLICHES.md "Bambus Client/"
+          zip -r Bambus-Client-Download.zip "Bambus Client"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Bambus-Client-Download
+          path: Bambus-Client-Download.zip
+
+  # 5) Bei einem Tag (z. B. v3.3.0): Download-Seite (Release) anlegen
+  release:
+    if: always() && startsWith(github.ref, 'refs/tags/v') && needs.paket.result == 'success'
+    needs: [paket]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: quelle
+      - uses: actions/download-artifact@v4
+        with:
+          path: dateien
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Bambus Client ${{ github.ref_name }}
+          # Der Text kommt aus AENDERUNGEN.md – der Launcher zeigt ihn als „Was ist neu“
+          body_path: quelle/AENDERUNGEN.md
+          files: |
+            dateien/**/Bambus-Client-Download.zip
+            dateien/**/*.exe
+            dateien/**/*.dmg
+            dateien/**/BambusLauncher.jar
+            dateien/**/bambus-client-*.jar
